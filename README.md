@@ -74,9 +74,9 @@ Topics include:
 ```
 .
 ├── images/
-├── Lab0.ipynb
-├── Lab1.ipynb
-├── Lab2.ipynb
+├── 01_Introduction_to_Quantum_Computing.ipynb
+├── 02_Quantum_Teleportation.ipynb
+├── 03_Grovers_Algorithm_Sudoku.ipynb
 ├── README.md
 ├── LICENSE
 └── .gitignore
@@ -107,9 +107,9 @@ jupyter notebook
 
 Open the notebooks in order:
 
-1. Lab0.ipynb
-2. Lab1.ipynb
-3. Lab2.ipynb
+1. 01_Introduction_to_Quantum_Computing.ipynb
+2. 02_Quantum_Teleportation.ipynb
+3. 03_Grovers_Algorithm_Sudoku.ipynb
 
 ---
 
