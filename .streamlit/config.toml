@@ -1,5 +1,10 @@
 [server]
 headless = true
 
-[theme]
+# Defining BOTH themes makes Streamlit show a theme selector
+# (menu ⋮ → Settings → Theme: "Use system setting" / Light / Dark).
+[theme.light]
 primaryColor = "#6929c4"
+
+[theme.dark]
+primaryColor = "#be95ff"
