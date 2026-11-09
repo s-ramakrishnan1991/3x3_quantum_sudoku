@@ -64,6 +64,7 @@ Topics include:
 - Python
 - Qiskit
 - Jupyter Notebook
+- Streamlit (interactive web app)
 - NumPy
 - Matplotlib
 
@@ -73,10 +74,14 @@ Topics include:
 
 ```
 .
+├── app.py
+├── sudoku_grover/
+├── .streamlit/
 ├── images/
 ├── 01_Introduction_to_Quantum_Computing.ipynb
 ├── 02_Quantum_Teleportation.ipynb
 ├── 03_Grovers_Algorithm_Sudoku.ipynb
+├── requirements.txt
 ├── README.md
 ├── LICENSE
 └── .gitignore
@@ -110,6 +115,29 @@ Open the notebooks in order:
 1. 01_Introduction_to_Quantum_Computing.ipynb
 2. 02_Quantum_Teleportation.ipynb
 3. 03_Grovers_Algorithm_Sudoku.ipynb
+
+---
+
+## Interactive Web App (Streamlit)
+
+The Grover Sudoku lab is also available as an interactive Streamlit app with **Easy** and **Medium** difficulty levels and a **quantum backend comparison** page.
+
+### Run locally
+
+```bash
+pip install -r requirements.txt
+streamlit run app.py
+```
+
+### Deploy on Streamlit Community Cloud
+
+1. Push this repository to GitHub.
+2. Go to [share.streamlit.io](https://share.streamlit.io) and sign in with GitHub.
+3. Click **New app** and select this repository.
+4. Set **Main file path** to `app.py`.
+5. Click **Deploy**.
+
+Optional: install `iqm-client[qiskit]` in `requirements.txt` if you want live IQM fake-backend metrics on the deployed app.
 
 ---
 
