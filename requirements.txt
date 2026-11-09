@@ -1,0 +1,9 @@
+streamlit>=1.50,<2
+# Versions below were tested together. Newer qiskit 2.6.x + qiskit-aer 0.18.x
+# segfaulted the Streamlit server on the second script run, so keep these pinned.
+qiskit==2.2.3
+qiskit-aer==0.17.2
+qiskit-ibm-runtime==0.43.1
+pandas
+matplotlib
+pylatexenc
