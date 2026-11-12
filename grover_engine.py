@@ -23,19 +23,53 @@ from qiskit_aer import AerSimulator
 VALUES = (0, 1, 2)
 PERMS = list(itertools.permutations(VALUES))
 
-# Clue positions per difficulty (row, col).  Values are drawn at random but
-# always distinct, so every generated puzzle is guaranteed solvable.
-DIFFICULTY_CELLS = {
-    "easy": [(0, 0), (1, 1), (2, 2)],
-    "medium": [(0, 0), (1, 1)],
+ALL_CELLS = [(r, c) for r in range(3) for c in range(3)]
+
+# All 12 valid 3x3 Latin squares (rows and columns each contain 0,1,2 once).
+LATIN_SQUARES = [
+    rows for rows in itertools.product(PERMS, repeat=3)
+    if all({rows[r][c] for r in range(3)} == set(VALUES) for c in range(3))
+]
+
+# Difficulty = number of revealed clues.  Clue *positions* are random anywhere on
+# the grid.  Easy puzzles are additionally limited to 4 search qubits, so a layout
+# with all three clues in one row (6 qubits) can never be "easy".
+DIFFICULTY = {
+    "easy": {"clues": 3, "max_qubits": 4},
+    "medium": {"clues": 2, "max_qubits": 6},
 }
 
 
 def make_puzzle(difficulty: str, seed: int | None = None) -> dict:
+    """Random puzzle: clues at random cells, taken from a random solved grid.
+
+    Because the clues come from a real solution, the puzzle always has at least
+    one valid solution.
+    """
     rng = random.Random(seed)
-    cells = DIFFICULTY_CELLS[difficulty]
-    vals = rng.sample(list(VALUES), k=len(cells))
-    return dict(zip(cells, vals))
+    cfg = DIFFICULTY[difficulty]
+    for _ in range(1000):
+        solution = rng.choice(LATIN_SQUARES)
+        cells = rng.sample(ALL_CELLS, k=cfg["clues"])
+        fixed = {(r, c): solution[r][c] for r, c in cells}
+        if _qubit_count(fixed) <= cfg["max_qubits"]:
+            return fixed
+    raise RuntimeError("Could not generate a puzzle within the qubit budget.")
+
+
+def _row_choices(fixed: dict) -> list:
+    return [
+        [p for p in PERMS if all(p[c] == v for (rr, c), v in fixed.items() if rr == r)]
+        for r in range(3)
+    ]
+
+
+def _width(n_choices: int) -> int:
+    return 0 if n_choices <= 1 else math.ceil(math.log2(n_choices))
+
+
+def _qubit_count(fixed: dict) -> int:
+    return sum(_width(len(ch)) for ch in _row_choices(fixed))
 
 
 # --------------------------------------------------------------------------
@@ -81,7 +115,7 @@ def build_problem(fixed: dict) -> Problem:
         if not ch:
             raise ValueError(f"No legal permutations remain for row {r}.")
         row_choices.append(ch)
-    widths = [max(1, math.ceil(math.log2(len(c)))) for c in row_choices]
+    widths = [_width(len(c)) for c in row_choices]
     offsets = [0]
     for w in widths[:-1]:
         offsets.append(offsets[-1] + w)
@@ -126,8 +160,26 @@ def _phase_on_bitstring(qc, qubits, bits, ancillas):
             qc.x(q)
 
 
+def grover_success_probability(num_states: int, num_marked: int, iterations: int) -> float:
+    """Ideal (noiseless) probability of measuring a valid solution."""
+    theta = math.asin(math.sqrt(num_marked / num_states))
+    return math.sin((2 * iterations + 1) * theta) ** 2
+
+
 def grover_iterations(num_states: int, num_marked: int) -> int:
-    return max(1, round((math.pi / 4) * math.sqrt(num_states / num_marked)))
+    """Iteration count (>= 1) that maximises the ideal success probability.
+
+    The textbook pi/4*sqrt(N/M) overshoots when M/N is large (e.g. N=8, M=2), so
+    the best count is found directly.
+    """
+    best, best_p = 1, -1.0
+    for k in range(1, 40):
+        p = grover_success_probability(num_states, num_marked, k)
+        if p > best_p + 1e-12:
+            best, best_p = k, p
+        elif p < best_p - 1e-12:
+            break  # past the first peak
+    return best
 
 
 def build_grover(prob: Problem, iterations: int | None = None) -> QuantumCircuit:

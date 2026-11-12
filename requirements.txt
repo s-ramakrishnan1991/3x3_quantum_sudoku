@@ -1,9 +1,12 @@
 streamlit>=1.50,<2
-# Versions below were tested together. Newer qiskit 2.6.x + qiskit-aer 0.18.x
-# segfaulted the Streamlit server on the second script run, so keep these pinned.
-qiskit==2.2.3
+# Qiskit stack: these versions were resolved and tested together.
+#  - iqm-client[qiskit] 36 requires qiskit<2.2 and qiskit-aer<0.18
+#  - qiskit 2.6.x + qiskit-aer 0.18.x crashed (segfault) the Streamlit server on the 2nd rerun
+qiskit==2.1.2
 qiskit-aer==0.17.2
 qiskit-ibm-runtime==0.43.1
+qiskit-ionq==1.1.1
+iqm-client[qiskit]==36.0.0
 pandas
 matplotlib
 pylatexenc

@@ -6,42 +6,11 @@ import pandas as pd
 import streamlit as st
 
 import grover_engine as ge
+import hardware_tab
+from ui_helpers import fmt_rows, grid_html, inject_css, outcome_chart
 
 st.set_page_config(page_title="Quantum Sudoku · Grover", page_icon="🧩", layout="wide")
-
-# ---------------------------------------------------------------- helpers
-GRID_CSS = """
-<style>
-.sgrid{border-collapse:collapse;margin:0.25rem 0 0.5rem 0}
-.sgrid td{width:3.2rem;height:3.2rem;text-align:center;font-size:1.5rem;font-weight:600;
-          border:1.5px solid rgba(128,128,128,.55)}
-.sgrid td.clue{background:rgba(255,75,75,.18)}
-.sgrid td.empty{color:rgba(128,128,128,.6)}
-.sgrid td.ok{background:rgba(33,195,84,.20)}
-.sgrid td.bad{background:rgba(255,75,75,.25)}
-</style>
-"""
-st.markdown(GRID_CSS, unsafe_allow_html=True)
-
-
-def grid_html(rows=None, fixed=None, check=None):
-    """rows: 3x3 values (or None for puzzle view). fixed: clue dict highlighting."""
-    fixed = fixed or {}
-    out = ['<table class="sgrid">']
-    for r in range(3):
-        out.append("<tr>")
-        for c in range(3):
-            if rows is None:
-                v = fixed.get((r, c))
-                cls = "clue" if v is not None else "empty"
-                txt = str(v) if v is not None else "·"
-            else:
-                txt = str(rows[r][c])
-                cls = "clue" if (r, c) in fixed else (check or "")
-            out.append(f'<td class="{cls}">{txt}</td>')
-        out.append("</tr>")
-    out.append("</table>")
-    return "".join(out)
+inject_css()
 
 
 @st.cache_data(show_spinner=False)
@@ -55,15 +24,11 @@ def run_cached(fixed_items: tuple, backend: str, shots: int, iterations: int):
     return m, counts, secs, a
 
 
-def fmt_rows(rows):
-    return "|".join("".join(map(str, r)) for r in rows) if rows else "invalid code"
-
-
 # ---------------------------------------------------------------- sidebar
 st.sidebar.title("🧩 Quantum Sudoku")
 difficulty = st.sidebar.radio(
     "Difficulty", ["easy", "medium"], horizontal=True,
-    help="Easy: 3 clues on the diagonal. Medium: 2 clues. Fewer clues → more qubits → deeper circuits.",
+    help="Easy: 3 clues. Medium: 2 clues. Clue positions are random anywhere on the grid. Fewer clues → more qubits → deeper circuits.",
 )
 if "seed" not in st.session_state:
     st.session_state.seed = 1
@@ -97,8 +62,8 @@ st.write(
     "different quantum backends cope with the same circuit."
 )
 
-tab_solve, tab_compare, tab_how, tab_notes = st.tabs(
-    ["🎮 Solve", "📊 Backend comparison", "🔬 How it works", "ℹ️ Notes"]
+tab_solve, tab_compare, tab_hw, tab_how, tab_notes = st.tabs(
+    ["🎮 Solve", "📊 Backend comparison", "☁️ Real hardware", "🔬 How it works", "ℹ️ Notes"]
 )
 
 # ================================================================= SOLVE
@@ -140,20 +105,7 @@ with tab_solve:
                         if a["best_rows"] else "_Outcome is not a legal row encoding._",
                         unsafe_allow_html=True)
 
-            top = sorted(counts.items(), key=lambda kv: -kv[1])[:12]
-            df = pd.DataFrame({
-                "outcome": [f"{k}  →  {fmt_rows(prob.decode(prob.key_to_bits(k)))}" for k, _ in top],
-                "counts": [v for _, v in top],
-                "valid": ["valid" if prob.is_valid(prob.decode(prob.key_to_bits(k))) else "invalid"
-                          for k, _ in top],
-            })
-            chart = alt.Chart(df).mark_bar().encode(
-                x=alt.X("counts:Q", title="Shots"),
-                y=alt.Y("outcome:N", sort="-x", title=None),
-                color=alt.Color("valid:N", scale=alt.Scale(domain=["valid", "invalid"],
-                                                           range=["#21c354", "#ff4b4b"]), title=None),
-                tooltip=["outcome", "counts", "valid"],
-            ).properties(height=320, title="Top 12 measurement outcomes (bitstring → rows)")
+            chart = outcome_chart(prob, counts)
             st.altair_chart(chart, width="stretch")
         else:
             st.info("Pick a backend and press **Run**.")
@@ -180,6 +132,7 @@ with tab_compare:
                 "Native gates": ge.BACKENDS[b]["native"],
                 "Register width": m["register width"],
                 "Active qubits": m["active qubits"],
+                "Shots": shots,
                 "Total depth": m["total depth"],
                 "2Q depth": m["2Q depth"],
                 "2Q gates": m["2Q gates"],
@@ -195,7 +148,26 @@ with tab_compare:
 
     cmp_ = st.session_state.get("compare")
     if cmp_ and cmp_[0] == (tuple(sorted(fixed.items())), tuple(chosen), shots, iters):
-        df = pd.DataFrame(cmp_[1])
+        hw_rows = []
+        for r in hardware_tab.hardware_records(fixed, iters):
+            m = r["metrics"] or {}
+            hw_rows.append({
+                "Backend": f"{r['provider']} · {r['backend']}",
+                "Vendor": r["provider"], "Noise": "Real hardware", "Native gates": "device native",
+                "Register width": m.get("register width"), "Active qubits": m.get("active qubits"),
+                "Shots": r["analysis"]["shots"], "Total depth": m.get("total depth"),
+                "2Q depth": m.get("2Q depth"), "2Q gates": m.get("2Q gates"),
+                "Total gates": m.get("total gates"), "Success prob.": r["analysis"]["success"],
+                "Best outcome valid": "✅" if r["analysis"]["best_valid"] else "❌",
+                "Run time (s)": None,
+            })
+        df = pd.DataFrame(cmp_[1] + hw_rows)
+        int_cols = ["Register width", "Active qubits", "Shots", "Total depth", "2Q depth",
+                    "2Q gates", "Total gates"]
+        df[int_cols] = df[int_cols].astype("Int64")
+        if hw_rows:
+            st.caption(f"Includes {len(hw_rows)} real-hardware result(s) for this puzzle from the "
+                       "☁️ Real hardware tab.")
         st.dataframe(
             df, hide_index=True, width="stretch",
             column_config={
@@ -209,8 +181,8 @@ with tab_compare:
             ch = alt.Chart(df).mark_bar().encode(
                 x=alt.X("Backend:N", sort=None, axis=alt.Axis(labelAngle=-20)),
                 y=alt.Y("Success prob.:Q", axis=alt.Axis(format="%"), scale=alt.Scale(domain=[0, 1])),
-                color=alt.Color("Noise:N", scale=alt.Scale(domain=["Noiseless", "Noisy"],
-                                                           range=["#4c78a8", "#f58518"])),
+                color=alt.Color("Noise:N", scale=alt.Scale(domain=["Noiseless", "Noisy", "Real hardware"],
+                                                           range=["#4c78a8", "#f58518", "#9467bd"])),
                 tooltip=["Backend", alt.Tooltip("Success prob.:Q", format=".1%"), "Noise"],
             )
             rule = alt.Chart(pd.DataFrame({"y": [baseline]})).mark_rule(
@@ -239,11 +211,16 @@ with tab_compare:
             f"- **Shallowest two-qubit depth:** {cheapest['Backend']} ({cheapest['2Q depth']}).\n"
             f"- Noisy backends lose success probability roughly in step with their 2-qubit depth."
         )
-        with st.expander("Gate breakdown per backend"):
+        with st.expander("Gate breakdown per simulated backend"):
             st.dataframe(pd.DataFrame(cmp_[2]).fillna(0).astype(int).T, width="stretch")
     else:
         st.info("Select backends and press **Run comparison**. Try both difficulty levels: the medium "
-                "puzzle needs more qubits and a deeper circuit, so noisy backends degrade much faster.")
+                "puzzle needs more qubits and a deeper circuit, so noisy backends degrade much faster. "
+                "Finished real-hardware jobs for this puzzle are added to the table automatically.")
+
+# ================================================================= HARDWARE
+with tab_hw:
+    hardware_tab.render(fixed, prob, shots, iters)
 
 # ================================================================= HOW
 with tab_how:
@@ -294,10 +271,7 @@ with tab_notes:
     st.subheader("Backends and differences from the notebook")
     st.markdown(
         """
-The notebook uses the IonQ cloud simulator (API key), an IQM fake backend (needs Qiskit 1.x,
-incompatible with the IBM stack), and optionally a real IBM QPU (account and queue time). None
-of these can run in a shared public deployment, so this app uses credential-free equivalents
-that preserve the comparison:
+**Simulated backends** (no credentials, used on the Solve and comparison tabs):
 
 | Backend here | Stands in for | What is preserved |
 |---|---|---|
@@ -306,11 +280,17 @@ that preserve the comparison:
 | IQM-style noisy | IQM FakeApollo | 20-qubit square lattice, native `r, cz`; **synthetic** noise, not IQM's calibration |
 | IBM Marrakesh noisy | IBM fake backend | Real `ibm_marrakesh` snapshot (heavy-hex, calibration noise) |
 
-**Dropped:** the *hard* and *empty* difficulties (as requested), real-QPU execution, and M3
-readout mitigation (needs the `mthree` compiled package and a real backend's calibration
-circuits). Because of this, results on the noisy backends are a fair relative comparison but
-absolute numbers will differ from the IQM hardware model.
+**Real hardware** (optional, ☁️ tab): IBM Quantum (API key + CRN + choice of QPU), IQM (API key +
+choice of quantum computer) and IonQ (API key). Jobs run on your own account, are queued
+asynchronously, and finished results are added to the comparison table. Keys live only in your
+browser session's server memory and are never stored, cached or logged.
 
-Clue values are random but always distinct, which guarantees at least one valid solution.
+**Puzzles:** clues are placed at random cells of the grid and always taken from a valid solved
+grid, so every puzzle is solvable. Easy has 3 clues (at most 4 search qubits), medium has 2 clues
+(5-6 search qubits). Some puzzles have more than one valid solution; any of them counts as success,
+and the Grover iteration count is chosen to maximise the ideal success probability.
+
+**Dropped from the notebook:** the *hard* and *empty* difficulties (as requested) and M3 readout
+mitigation (needs the compiled `mthree` package and a real backend's calibration circuits).
         """
     )
