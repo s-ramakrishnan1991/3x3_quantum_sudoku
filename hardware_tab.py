@@ -39,6 +39,8 @@ def _creds(provider: str) -> dict:
     return {"token": ss.get("ionq_token", "")}
 
 
+
+
 # ------------------------------------------------------------------ polling
 def _refresh(job: dict):
     try:
@@ -55,6 +57,7 @@ def _refresh(job: dict):
         st.session_state.hw_results[job["job_id"]] = {
             **{k: job[k] for k in ("provider", "backend", "job_id", "shots", "metrics",
                                    "fixed_items", "iters")},
+            "kind": job.get("kind", "Real hardware"), "detail": job.get("detail", ""),
             "counts": counts,
             "analysis": ge.analyse_counts(prob, counts),
         }
@@ -66,7 +69,8 @@ def _render_job(job: dict):
     prob = ge.build_problem(dict(job["fixed_items"]))
     fixed = dict(job["fixed_items"])
     status = job["status"]
-    head = f"{ICON[status]} {job['provider']} · {job['backend']} · {status}"
+    detail = f" ({job['detail']})" if job.get("detail") else ""
+    head = f"{ICON[status]} {job['provider']} · {job['backend']}{detail} · {status}"
     with st.expander(head, expanded=(status == "done")):
         st.caption(f"Job ID: `{job['job_id']}` · {job['shots']} shots · "
                    f"submitted {time.strftime('%H:%M:%S', time.localtime(job['submitted']))}")
@@ -129,7 +133,7 @@ def _submit(provider, fixed, prob, shots, iters, **kwargs):
             return
     st.session_state.hw_jobs.append({
         "provider": sub.provider, "backend": sub.backend, "job_id": sub.job_id,
-        "shots": sub.shots, "metrics": sub.metrics,
+        "shots": sub.shots, "metrics": sub.metrics, "kind": sub.kind, "detail": sub.detail,
         "fixed_items": tuple(sorted(fixed.items())), "iters": iters,
         "status": "queued", "submitted": time.time(), "polled_at": 0,
     })
@@ -140,7 +144,7 @@ def _submit(provider, fixed, prob, shots, iters, **kwargs):
 # ------------------------------------------------------------------ main UI
 def render(fixed: dict, prob: ge.Problem, shots: int, iters: int):
     _init_state()
-    st.subheader("Run on real quantum hardware (optional)")
+    st.subheader("Real hardware and cloud simulators (optional)")
     n_tot = prob.num_qubits + max(0, prob.num_qubits - 3)
     st.markdown(
         f"The current puzzle uses a **{n_tot}-qubit** circuit ({prob.num_qubits} search + "
@@ -150,11 +154,11 @@ def render(fixed: dict, prob: ge.Problem, shots: int, iters: int):
     )
     st.warning(
         "Hardware jobs use **your own** account and can consume quota or credits (IonQ and paid IBM "
-        "plans can incur charges). Jobs queue for minutes to hours; you can leave this page open "
+        "plans can incur charges, so check your plan and lower the shots in the sidebar first). Jobs queue for minutes to hours; you can leave this page open "
         "and the status updates automatically. API keys are used only for this browser session, "
         "are never stored or logged by the app, and are scrubbed from error messages."
     )
-    ack = st.checkbox("I understand this will run on real hardware using my account.", key="hw_ack")
+    ack = st.checkbox("I understand this will run on real hardware or cloud services using my account.", key="hw_ack")
 
     tab_ibm, tab_iqm, tab_ionq = st.tabs(["IBM Quantum", "IQM", "IonQ"])
 
@@ -208,13 +212,25 @@ def render(fixed: dict, prob: ge.Problem, shots: int, iters: int):
     # ---- IonQ
     with tab_ionq:
         st.text_input("API key", type="password", key="ionq_token", help="IonQ Cloud API key")
-        with st.expander("Advanced"):
-            st.text_input("QPU name", value=rb.IONQ_BACKEND, key="ionq_backend",
-                          help="Only change this if the generic target is rejected, "
-                               "e.g. ionq_qpu.forte-1")
+        target = st.radio("Target", ["QPU (real hardware)", "Noisy simulator (cloud)"], key="ionq_target",
+                          horizontal=True)
+        noise_model = None
+        if target.startswith("Noisy"):
+            noise_model = st.selectbox(
+                "Noise model", rb.IONQ_NOISE_MODELS, key="ionq_noise",
+                help="IonQ's cloud simulator with a QPU-derived noise model. aria-1 and aria-2 are "
+                     "legacy models (those QPUs are retired).")
+            st.caption("IonQ states that noise-model simulations are free for users with direct IonQ "
+                       "access. Results appear in the comparison table as a *Cloud simulator*.")
+        else:
+            with st.expander("Advanced"):
+                st.text_input("QPU name", value=rb.IONQ_BACKEND, key="ionq_backend",
+                              help="Only change this if the generic target is rejected, "
+                                   "e.g. ionq_qpu.forte-1")
         if st.button("🚀 Submit to IonQ", key="ionq_submit", type="primary", disabled=not ack):
             _submit("IonQ", fixed, prob, shots, iters, token=st.session_state.ionq_token,
-                    backend_name=(st.session_state.ionq_backend or rb.IONQ_BACKEND).strip())
+                    backend_name=(st.session_state.get("ionq_backend") or rb.IONQ_BACKEND).strip(),
+                    ionq_noise_model=noise_model)
 
     # ---- jobs
     st.markdown("---")
@@ -224,7 +240,7 @@ def render(fixed: dict, prob: ge.Problem, shots: int, iters: int):
     with st.expander("Retrieve an earlier job by ID"):
         st.caption("Use this if you closed the page while a job was queued. The result is decoded "
                    "against the **puzzle currently shown**, so make sure it is the same puzzle "
-                   "and iteration count you submitted. Enter the API key (and CRN for IBM) above first.")
+                   "and iteration count you submitted. Enter the credentials above first.")
         r_provider = st.selectbox("Provider", rb.PROVIDERS, key="hw_ret_provider")
         r_id = st.text_input("Job ID", key="hw_ret_id")
         r_backend = st.text_input("Backend / quantum computer name", key="hw_ret_backend",
@@ -237,6 +253,8 @@ def render(fixed: dict, prob: ge.Problem, shots: int, iters: int):
                     "provider": r_provider,
                     "backend": r_backend.strip() or ("ionq_qpu" if r_provider == "IonQ" else "unknown"),
                     "job_id": r_id.strip(), "shots": shots, "metrics": None,
+                    "kind": "Cloud simulator" if "simulator" in r_backend.lower() else "Real hardware",
+                    "detail": "",
                     "fixed_items": tuple(sorted(fixed.items())), "iters": iters,
                     "status": "queued", "submitted": time.time(), "polled_at": 0,
                 })

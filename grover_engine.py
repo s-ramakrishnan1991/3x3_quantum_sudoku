@@ -253,10 +253,22 @@ def _iqm_like_backend(rows=4, cols=5, seed=7):
 
 
 @lru_cache(maxsize=1)
-def _ibm_marrakesh_sim():
-    """Building the 156-qubit noise model is slow, so do it once per process."""
-    from qiskit_ibm_runtime.fake_provider import FakeMarrakesh
-    return AerSimulator.from_backend(FakeMarrakesh())
+def _ibm_fake_sim(device: str):
+    """Noisy Aer simulator for one IBM fake device.
+
+    Each 120-156 qubit noise model is slow to build and costs ~300-400 MB, so only the most
+    recently used device is kept (maxsize=1). This bounds memory on small hosts such as
+    Streamlit Community Cloud, at the price of a rebuild when switching device.
+    """
+    if device == "marrakesh":
+        from qiskit_ibm_runtime.fake_provider import FakeMarrakesh as Fake
+    elif device == "boston":
+        from fake_ibm_extra import FakeBoston as Fake
+    elif device == "miami":
+        from fake_ibm_extra import FakeMiami as Fake
+    else:
+        raise KeyError(device)
+    return AerSimulator.from_backend(Fake())
 
 
 @lru_cache(maxsize=1)
@@ -265,7 +277,101 @@ def _iqm_backend_and_sim():
     return be, AerSimulator.from_backend(be)
 
 
+# --------------------------------------------------------------------------
+# Noisy simulators: Cirq, and Quantinuum (pytket compiler + PECOS emulator).
+# --------------------------------------------------------------------------
+CIRQ_P, CIRQ_READOUT = 0.0003, 0.01
+
+
+def _cirq_ops(tc):
+    """Qiskit circuit in {rz, sx, x, cx, measure} -> (cirq qubits, cirq ops, {clbit: qubit index})."""
+    import cirq
+
+    qs = cirq.LineQubit.range(tc.num_qubits)
+    ops, meas = [], {}
+    for inst in tc.data:
+        name, idx = inst.operation.name, [tc.find_bit(q).index for q in inst.qubits]
+        if name == "rz":
+            ops.append(cirq.rz(float(inst.operation.params[0])).on(qs[idx[0]]))
+        elif name == "sx":
+            ops.append((cirq.X ** 0.5).on(qs[idx[0]]))
+        elif name == "x":
+            ops.append(cirq.X.on(qs[idx[0]]))
+        elif name == "cx":
+            ops.append(cirq.CNOT.on(qs[idx[0]], qs[idx[1]]))
+        elif name == "measure":
+            meas[tc.find_bit(inst.clbits[0]).index] = idx[0]
+        elif name != "barrier":
+            raise ValueError(f"Unexpected gate {name}")
+    return qs, ops, meas
+
+
+def _cirq_counts(measurements, flip=0.0, seed=0):
+    """Cirq measurement rows (bit i = clbit i) -> qiskit-style count keys (clbit n-1 first)."""
+    from collections import Counter
+
+    rng = random.Random(seed)
+    counts = Counter()
+    for row in measurements:
+        bits = [int(b) ^ (flip > 0 and rng.random() < flip) for b in row]
+        counts["".join(str(b) for b in reversed(bits))] += 1
+    return dict(counts)
+
+
+def _run_cirq(circuit, shots, seed):
+    """Real Cirq density-matrix simulation with depolarizing + readout noise."""
+    import cirq
+
+    tc = transpile(circuit, basis_gates=["rz", "sx", "x", "cx", "measure"],
+                   optimization_level=3, seed_transpiler=seed)
+    qs, ops, meas = _cirq_ops(tc)
+    cols = sorted(meas)
+    ops.append(cirq.measure(*[qs[meas[c]] for c in cols], key="m"))
+    model = cirq.ConstantQubitNoiseModel(cirq.depolarize(CIRQ_P))
+    res = cirq.DensityMatrixSimulator(noise=model, seed=seed).run(cirq.Circuit(ops), repetitions=shots)
+    return tc, _cirq_counts(res.measurements["m"], CIRQ_READOUT, seed)
+
+
+# Quantinuum H-series error rates (order of magnitude of the published H2 figures)
+QTM_ERR = {"p1": 3e-5, "p2": 1.5e-3, "p_meas": 1e-3, "p_init": 1e-4}
+
+
+def _run_quantinuum(circuit, shots, seed):
+    """pytket-quantinuum compiles to H2 native gates; PECOS emulates it with H-series noise."""
+    from pecos.error_models.depolarizing_error_model import DepolarizingErrorModel
+    from pytket.backends.backendresult import BackendResult
+    from pytket.extensions.quantinuum import QuantinuumBackend
+    from pytket.qasm import circuit_from_qasm_str
+    from pytket_pecos import Emulator
+    from qiskit import qasm2
+
+    tc = transpile(circuit, basis_gates=["rz", "sx", "x", "cx", "measure"],
+                   optimization_level=3, seed_transpiler=seed)
+    be = QuantinuumBackend("H2-1LE")  # local emulator device, no account or network needed
+    native = be.get_compiled_circuit(circuit_from_qasm_str(qasm2.dumps(tc)), 2)
+    em = Emulator(native, error_model=DepolarizingErrorModel(error_params=dict(QTM_ERR)),
+                  qsim="state-vector", seed=seed)
+    res = BackendResult(c_bits=native.bits, shots=em.run(n_shots=shots))
+    from collections import Counter
+    counts = Counter()
+    for bits, v in res.get_counts().items():
+        counts["".join(str(int(x)) for x in reversed(bits))] += v
+    return tc, dict(counts)
+
+
 BACKENDS = {
+    "Cirq noisy": {
+        "vendor": "Google Cirq",
+        "noise": "Noisy",
+        "native": "rz, sx, x, cx",
+        "desc": "Cirq's own density-matrix simulator with depolarizing noise after every moment (p=0.03% per qubit per moment) plus 1% readout flips.",
+    },
+    "Quantinuum noisy": {
+        "vendor": "Quantinuum (H2 emulator)",
+        "noise": "Noisy",
+        "native": "ZZPhase, PhasedX, Rz (all-to-all)",
+        "desc": "Compiled with Quantinuum's pytket compiler for H2 native gates and run on the PECOS emulator with H-series-level depolarizing and measurement errors (local emulator, no account needed).",
+    },
     "Aer ideal": {
         "vendor": "Qiskit Aer",
         "noise": "Noiseless",
@@ -290,6 +396,18 @@ BACKENDS = {
         "native": "sx, rz, x, cz (heavy-hex)",
         "desc": "156-qubit ibm_marrakesh snapshot (calibration noise model) run on Aer, transpiled at optimization level 3.",
     },
+    "IBM Boston noisy": {
+        "vendor": "IBM (fake backend)",
+        "noise": "Noisy",
+        "native": "sx, rz, x, cz",
+        "desc": "156-qubit ibm_boston snapshot (calibration noise model) run on Aer, transpiled at optimization level 3.",
+    },
+    "IBM Miami noisy": {
+        "vendor": "IBM (fake backend)",
+        "noise": "Noisy",
+        "native": "sx, rz, x, cz (square lattice)",
+        "desc": "120-qubit ibm_miami snapshot (calibration noise model) run on Aer, transpiled at optimization level 3.",
+    },
 }
 
 
@@ -308,9 +426,19 @@ def run_backend(name: str, circuit: QuantumCircuit, shots: int, seed: int = 1234
         tc = transpile(circuit, backend=be, optimization_level=3, seed_transpiler=seed)
         res = sim.run(tc, shots=shots, seed_simulator=seed).result()
     elif name == "IBM Marrakesh noisy":
-        sim = _ibm_marrakesh_sim()
+        sim = _ibm_fake_sim("marrakesh")
         tc = transpile(circuit, backend=sim, optimization_level=3, seed_transpiler=seed)
         res = sim.run(tc, shots=shots, seed_simulator=seed).result()
+    elif name in ("IBM Boston noisy", "IBM Miami noisy"):
+        sim = _ibm_fake_sim("boston" if name == "IBM Boston noisy" else "miami")
+        tc = transpile(circuit, backend=sim, optimization_level=3, seed_transpiler=seed)
+        res = sim.run(tc, shots=shots, seed_simulator=seed).result()
+    elif name == "Cirq noisy":
+        tc, counts = _run_cirq(circuit, shots, seed)
+        return tc, counts, time.time() - t0
+    elif name == "Quantinuum noisy":
+        tc, counts = _run_quantinuum(circuit, shots, seed)
+        return tc, counts, time.time() - t0
     else:
         raise KeyError(name)
     return tc, dict(res.get_counts()), time.time() - t0

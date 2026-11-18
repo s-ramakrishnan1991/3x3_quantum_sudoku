@@ -1,5 +1,5 @@
 streamlit>=1.50,<2
-# Qiskit stack: these versions were resolved and tested together.
+# Qiskit stack: these versions were resolved and tested together (uv, Python 3.12/3.13).
 #  - iqm-client[qiskit] 36 requires qiskit<2.2 and qiskit-aer<0.18
 #  - qiskit 2.6.x + qiskit-aer 0.18.x crashed (segfault) the Streamlit server on the 2nd rerun
 qiskit==2.1.2
@@ -7,6 +7,14 @@ qiskit-aer==0.17.2
 qiskit-ibm-runtime==0.43.1
 qiskit-ionq==1.1.1
 iqm-client[qiskit]==36.0.0
+# ibm-platform-services (pulled in by qiskit-ibm-runtime) fails to build with newer sdk-core/dateutil
+ibm-cloud-sdk-core==3.24.1
+python-dateutil<3
+# Cirq noisy simulator
+cirq-core
+# Quantinuum: pytket compiler + local PECOS emulator (the [pecos] extra needs a pre-release, see below)
+pytket-quantinuum[pecos]==0.59.3
+quantum-pecos==0.8.0.dev8
 pandas
 matplotlib
 pylatexenc

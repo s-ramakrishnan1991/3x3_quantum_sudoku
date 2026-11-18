@@ -63,7 +63,7 @@ st.write(
 )
 
 tab_solve, tab_compare, tab_hw, tab_how, tab_notes = st.tabs(
-    ["🎮 Solve", "📊 Backend comparison", "☁️ Real hardware", "🔬 How it works", "ℹ️ Notes"]
+    ["🎮 Solve", "📊 Backend comparison", "☁️ Hardware & cloud", "🔬 How it works", "ℹ️ Notes"]
 )
 
 # ================================================================= SOLVE
@@ -151,9 +151,11 @@ with tab_compare:
         hw_rows = []
         for r in hardware_tab.hardware_records(fixed, iters):
             m = r["metrics"] or {}
+            detail = f" ({r['detail']})" if r.get("detail") else ""
             hw_rows.append({
-                "Backend": f"{r['provider']} · {r['backend']}",
-                "Vendor": r["provider"], "Noise": "Real hardware", "Native gates": "device native",
+                "Backend": f"{r['provider']} · {r['backend']}{detail}",
+                "Vendor": r["provider"], "Noise": r.get("kind", "Real hardware"),
+                "Native gates": "device native",
                 "Register width": m.get("register width"), "Active qubits": m.get("active qubits"),
                 "Shots": r["analysis"]["shots"], "Total depth": m.get("total depth"),
                 "2Q depth": m.get("2Q depth"), "2Q gates": m.get("2Q gates"),
@@ -167,7 +169,7 @@ with tab_compare:
         df[int_cols] = df[int_cols].astype("Int64")
         if hw_rows:
             st.caption(f"Includes {len(hw_rows)} real-hardware result(s) for this puzzle from the "
-                       "☁️ Real hardware tab.")
+                       "☁️ Hardware & cloud tab.")
         st.dataframe(
             df, hide_index=True, width="stretch",
             column_config={
@@ -181,8 +183,8 @@ with tab_compare:
             ch = alt.Chart(df).mark_bar().encode(
                 x=alt.X("Backend:N", sort=None, axis=alt.Axis(labelAngle=-20)),
                 y=alt.Y("Success prob.:Q", axis=alt.Axis(format="%"), scale=alt.Scale(domain=[0, 1])),
-                color=alt.Color("Noise:N", scale=alt.Scale(domain=["Noiseless", "Noisy", "Real hardware"],
-                                                           range=["#4c78a8", "#f58518", "#9467bd"])),
+                color=alt.Color("Noise:N", scale=alt.Scale(domain=["Noiseless", "Noisy", "Cloud simulator", "Real hardware"],
+                                                           range=["#4c78a8", "#f58518", "#2ca02c", "#9467bd"])),
                 tooltip=["Backend", alt.Tooltip("Success prob.:Q", format=".1%"), "Noise"],
             )
             rule = alt.Chart(pd.DataFrame({"y": [baseline]})).mark_rule(
@@ -216,7 +218,7 @@ with tab_compare:
     else:
         st.info("Select backends and press **Run comparison**. Try both difficulty levels: the medium "
                 "puzzle needs more qubits and a deeper circuit, so noisy backends degrade much faster. "
-                "Finished real-hardware jobs for this puzzle are added to the table automatically.")
+                "Finished real-hardware and cloud-simulator jobs for this puzzle are added to the table automatically.")
 
 # ================================================================= HARDWARE
 with tab_hw:
@@ -279,11 +281,23 @@ with tab_notes:
 | IonQ-style ideal | IonQ simulator | Same gate set and opt. level 0; ideal simulation on Aer |
 | IQM-style noisy | IQM FakeApollo | 20-qubit square lattice, native `r, cz`; **synthetic** noise, not IQM's calibration |
 | IBM Marrakesh noisy | IBM fake backend | Real `ibm_marrakesh` snapshot (heavy-hex, calibration noise) |
+| IBM Boston noisy | IBM FakeBoston | Real `ibm_boston` snapshot, 156 qubits (data bundled with the app) |
+| IBM Miami noisy | IBM FakeMiami | Real `ibm_miami` snapshot, 120 qubits (data bundled with the app) |
+| Cirq noisy | Google Cirq | Cirq's own density-matrix simulator, depolarizing noise per moment + readout flips |
+| Quantinuum noisy | Quantinuum H2 local emulator | pytket-quantinuum compiles to H2 native gates; PECOS emulates it with H-series-level depolarizing/measurement errors |
+
+Cirq and Quantinuum run locally with no accounts. Their error rates are order-of-magnitude values I chose, not live
+calibration data.
+
+FakeBoston and FakeMiami only exist in `qiskit-ibm-runtime` 0.47+, which needs Qiskit 2.2+ and cannot be
+installed next to the IQM client. Their unmodified Apache-2.0 data files are bundled in `fake_backends/`.
+Only one IBM noise model is kept loaded at a time to limit memory, so switching IBM device takes ~10 s.
 
 **Real hardware** (optional, ☁️ tab): IBM Quantum (API key + CRN + choice of QPU), IQM (API key +
-choice of quantum computer) and IonQ (API key). Jobs run on your own account, are queued
-asynchronously, and finished results are added to the comparison table. Keys live only in your
-browser session's server memory and are never stored, cached or logged.
+choice of quantum computer), IonQ (API key; QPU or noisy cloud simulator with a choice of noise model). Jobs run on your own
+account, are queued asynchronously, and finished results are added to the comparison table. Keys
+live only in your browser session's server memory and are never stored, cached, logged or written
+to environment variables.
 
 **Puzzles:** clues are placed at random cells of the grid and always taken from a valid solved
 grid, so every puzzle is solvable. Easy has 3 clues (at most 4 search qubits), medium has 2 clues

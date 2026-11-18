@@ -24,7 +24,9 @@ IQM_DEFAULT_URL = "https://resonance.iqm.tech/"
 # Common IQM Resonance system aliases; the UI also accepts a custom alias.
 IQM_COMPUTERS = ["garnet", "emerald", "sirius"]
 IONQ_BACKEND = "ionq_qpu"
-
+IONQ_SIMULATOR = "ionq_simulator"
+# Noise models of IonQ's cloud simulator (docs.ionq.com). aria-1/aria-2 are legacy (QPUs retired).
+IONQ_NOISE_MODELS = ["forte-1", "forte-enterprise-1", "aria-2", "aria-1"]
 FINAL_STATES = {"done", "error", "cancelled"}
 
 
@@ -39,6 +41,8 @@ class Submission:
     job_id: str
     shots: int
     metrics: dict  # transpiled-circuit metrics (see grover_engine.circuit_metrics)
+    kind: str = "Real hardware"  # or "Cloud simulator"
+    detail: str = ""             # e.g. "forte-1 noise model"
 
 
 # ---------------------------------------------------------------- utilities
@@ -61,7 +65,7 @@ def normalize_status(status) -> str:
         return "done"
     if name in {"ERROR", "FAILED"}:
         return "error"
-    if name in {"CANCELLED", "CANCELED"}:
+    if name in {"CANCELLED", "CANCELED", "CANCELLING"}:
         return "cancelled"
     if name in {"RUNNING", "EXECUTING"}:
         return "running"
@@ -161,16 +165,18 @@ def _ionq_backend(token, name=None):
         return IonQProvider(token).get_backend(name or IONQ_BACKEND)
 
 
-def _ionq_submit(circuit, shots, token, name) -> Submission:
-    backend = _ionq_backend(token, name)
-    # The SDK sizes the backend with an online lookup and silently falls back to 4
-    # qubits when it fails, which would wrongly reject our 5-9 qubit circuits. IonQ
-    # is all-to-all connected, so translate to its gate set without a device target.
-    # Optimization level 0 matches the notebook's IonQ run.
-    tc = transpile(circuit, basis_gates=ge.IONQ_BASIS, optimization_level=0,
-                   seed_transpiler=1234)
+def _ionq_submit(circuit, shots, token, name, noise_model=None) -> Submission:
+    simulator = bool(noise_model)
+    backend = _ionq_backend(token, IONQ_SIMULATOR if simulator else name)
+    if simulator:
+        backend.set_options(noise_model=noise_model)  # IonQ cloud simulator with a QPU noise model
+    # IonQ is all-to-all connected; translate to its gate set without a device target (the SDK's
+    # online qubit-count lookup can fall back to 4 qubits). Level 0 matches the notebook.
+    tc = transpile(circuit, basis_gates=ge.IONQ_BASIS, optimization_level=0, seed_transpiler=1234)
     job = backend.run(tc, shots=shots)
-    return Submission("IonQ", backend.name, job.job_id(), shots, ge.circuit_metrics(tc))
+    return Submission("IonQ", backend.name, job.job_id(), shots, ge.circuit_metrics(tc),
+                      kind="Cloud simulator" if simulator else "Real hardware",
+                      detail=f"{noise_model} noise model" if simulator else "")
 
 
 def _ionq_fetch(job_id, token, name):
@@ -188,10 +194,13 @@ def _ionq_fetch(job_id, token, name):
 
 
 # ---------------------------------------------------------------- public API
-def submit(provider: str, circuit: QuantumCircuit, shots: int, *, token: str,
+def submit(provider: str, circuit: QuantumCircuit, shots: int, *, token: str = "",
            crn: str | None = None, backend_name: str | None = None,
-           iqm_url: str | None = None) -> Submission:
-    """Transpile for the chosen QPU and queue the job. Returns immediately."""
+           iqm_url: str | None = None,
+           ionq_noise_model: str | None = None) -> Submission:
+    """Transpile for the chosen QPU and queue the job. Returns immediately.
+
+    """
     if not token or not token.strip():
         raise HardwareError("Please enter an API key.")
     token = token.strip()
@@ -207,7 +216,7 @@ def submit(provider: str, circuit: QuantumCircuit, shots: int, *, token: str,
                 raise HardwareError("Please choose an IQM quantum computer.")
             return _iqm_submit(circuit, shots, token, iqm_url, backend_name.strip())
         if provider == "IonQ":
-            return _ionq_submit(circuit, shots, token, backend_name)
+            return _ionq_submit(circuit, shots, token, backend_name, ionq_noise_model)
         raise HardwareError(f"Unknown provider: {provider}")
     except HardwareError:
         raise
@@ -215,7 +224,7 @@ def submit(provider: str, circuit: QuantumCircuit, shots: int, *, token: str,
         raise _wrap(exc, token, crn) from None
 
 
-def fetch(provider: str, job_id: str, *, token: str, crn: str | None = None,
+def fetch(provider: str, job_id: str, *, token: str = "", crn: str | None = None,
           backend_name: str | None = None, iqm_url: str | None = None,
           creg: str = "c"):
     """Poll a job. Returns (status, counts_or_None, error_message_or_None)."""
