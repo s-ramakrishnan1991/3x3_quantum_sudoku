@@ -279,16 +279,14 @@ with tab_notes:
 |---|---|---|
 | Aer ideal | Notebook's local Aer run | Identical: `rz, sx, x, cx`, opt. level 3 |
 | IonQ-style ideal | IonQ simulator | Same gate set and opt. level 0; ideal simulation on Aer |
-| IQM-style noisy | IQM FakeApollo | 20-qubit square lattice, native `r, cz`; **synthetic** noise, not IQM's calibration |
+| IQM Garnet noisy | IQMFakeGarnet | 20 qubits, native `r, cz`; noise data (T1/T2, gate and readout errors) from IQM's own error profile |
 | IBM Marrakesh noisy | IBM fake backend | Real `ibm_marrakesh` snapshot (heavy-hex, calibration noise) |
 | IBM Boston noisy | IBM FakeBoston | Real `ibm_boston` snapshot, 156 qubits (data bundled with the app) |
 | IBM Miami noisy | IBM FakeMiami | Real `ibm_miami` snapshot, 120 qubits (data bundled with the app) |
-| Cirq noisy | Google Cirq | Cirq's own density-matrix simulator, depolarizing noise per moment + readout flips |
-| Quantinuum noisy | Quantinuum H2 local emulator | pytket-quantinuum compiles to H2 native gates; PECOS emulates it with H-series-level depolarizing/measurement errors |
+| Cirq noisy | Google Willow (cirq-google) | Cirq's `NoiseModelFromGoogleNoiseProperties` with the median calibration of Google's Willow device (105-qubit grid, CZ gates), after routing the circuit onto it |
+| Quantinuum noisy | Quantinuum H2 local emulator | pytket-quantinuum compiles to H2 native gates; PECOS emulates it with the typical error figures from the H2 product data sheet v2.00 (1q 3e-5, 2q 1.5e-3, SPAM 1.5e-3) |
 
-Cirq and Quantinuum run locally with no accounts. Their error rates are order-of-magnitude values I chose, not live
-calibration data.
-
+Cirq and Quantinuum run locally with no accounts. Memory and cross-talk errors are not modelled for Quantinuum. 
 FakeBoston and FakeMiami only exist in `qiskit-ibm-runtime` 0.47+, which needs Qiskit 2.2+ and cannot be
 installed next to the IQM client. Their unmodified Apache-2.0 data files are bundled in `fake_backends/`.
 Only one IBM noise model is kept loaded at a time to limit memory, so switching IBM device takes ~10 s.

@@ -12,6 +12,7 @@ ibm-cloud-sdk-core==3.24.1
 python-dateutil<3
 # Cirq noisy simulator
 cirq-core
+cirq-google
 # Quantinuum: pytket compiler + local PECOS emulator (the [pecos] extra needs a pre-release, see below)
 pytket-quantinuum[pecos]==0.59.3
 quantum-pecos==0.8.0.dev8

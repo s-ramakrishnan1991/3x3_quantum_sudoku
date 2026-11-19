@@ -16,7 +16,6 @@ from dataclasses import dataclass, field
 from qiskit import QuantumCircuit, transpile
 from qiskit.circuit.library import MCXVChain
 from qiskit.converters import circuit_to_dag
-from qiskit.providers.fake_provider import GenericBackendV2
 from qiskit.transpiler import CouplingMap
 from qiskit_aer import AerSimulator
 
@@ -233,25 +232,6 @@ def circuit_metrics(circuit) -> dict:
 IONQ_BASIS = ["x", "y", "z", "h", "s", "sdg", "t", "tdg", "rx", "ry", "rz", "cx", "swap", "measure"]
 
 
-def _iqm_like_backend(rows=4, cols=5, seed=7):
-    """20-qubit square-lattice device with IQM's native {r, cz} gate set and noise."""
-    edges = []
-    for r in range(rows):
-        for c in range(cols):
-            i = r * cols + c
-            if c + 1 < cols:
-                edges.append([i, i + 1])
-            if r + 1 < rows:
-                edges.append([i, i + cols])
-    return GenericBackendV2(
-        num_qubits=rows * cols,
-        basis_gates=["r", "cz"],
-        coupling_map=CouplingMap(edges),
-        noise_info=True,
-        seed=seed,
-    )
-
-
 @lru_cache(maxsize=1)
 def _ibm_fake_sim(device: str):
     """Noisy Aer simulator for one IBM fake device.
@@ -273,67 +253,77 @@ def _ibm_fake_sim(device: str):
 
 @lru_cache(maxsize=1)
 def _iqm_backend_and_sim():
-    be = _iqm_like_backend()
-    return be, AerSimulator.from_backend(be)
+    """IQM Garnet (20 qubits, native r/cz) with the noise model IQM ships with its fake backend.
+
+    The noise comes from IQM's error profile (per-qubit T1/T2, gate depolarizing errors, readout
+    errors, gate durations). AerSimulator.from_backend would drop it, so the model is passed explicitly.
+    """
+    from iqm.qiskit_iqm.fake_backends.fake_garnet import IQMFakeGarnet
+
+    be = IQMFakeGarnet()
+    return be, AerSimulator(noise_model=be.noise_model)
 
 
 # --------------------------------------------------------------------------
 # Noisy simulators: Cirq, and Quantinuum (pytket compiler + PECOS emulator).
 # --------------------------------------------------------------------------
-CIRQ_P, CIRQ_READOUT = 0.0003, 0.01
 
 
-def _cirq_ops(tc):
-    """Qiskit circuit in {rz, sx, x, cx, measure} -> (cirq qubits, cirq ops, {clbit: qubit index})."""
-    import cirq
+@lru_cache(maxsize=1)
+def _cirq_google_noise():
+    """Google 'willow_pink' noise properties that ship with cirq-google (median device calibration)."""
+    import cirq_google as cg
+    from cirq_google.engine import load_device_noise_properties
 
-    qs = cirq.LineQubit.range(tc.num_qubits)
-    ops, meas = [], {}
-    for inst in tc.data:
-        name, idx = inst.operation.name, [tc.find_bit(q).index for q in inst.qubits]
-        if name == "rz":
-            ops.append(cirq.rz(float(inst.operation.params[0])).on(qs[idx[0]]))
-        elif name == "sx":
-            ops.append((cirq.X ** 0.5).on(qs[idx[0]]))
-        elif name == "x":
-            ops.append(cirq.X.on(qs[idx[0]]))
-        elif name == "cx":
-            ops.append(cirq.CNOT.on(qs[idx[0]], qs[idx[1]]))
-        elif name == "measure":
-            meas[tc.find_bit(inst.clbits[0]).index] = idx[0]
-        elif name != "barrier":
-            raise ValueError(f"Unexpected gate {name}")
-    return qs, ops, meas
-
-
-def _cirq_counts(measurements, flip=0.0, seed=0):
-    """Cirq measurement rows (bit i = clbit i) -> qiskit-style count keys (clbit n-1 first)."""
-    from collections import Counter
-
-    rng = random.Random(seed)
-    counts = Counter()
-    for row in measurements:
-        bits = [int(b) ^ (flip > 0 and rng.random() < flip) for b in row]
-        counts["".join(str(b) for b in reversed(bits))] += 1
-    return dict(counts)
+    props = load_device_noise_properties("willow_pink")
+    qubits = sorted(props.t1_ns)
+    index = {q: i for i, q in enumerate(qubits)}
+    edges = [[index[a], index[b]] for a in qubits for b in qubits if a < b and a.is_adjacent(b)]
+    edges += [[b, a] for a, b in edges]
+    return qubits, CouplingMap(edges), cg.NoiseModelFromGoogleNoiseProperties(props)
 
 
 def _run_cirq(circuit, shots, seed):
-    """Real Cirq density-matrix simulation with depolarizing + readout noise."""
+    """Cirq with the noise model and median calibration of Google's 'willow_pink' device (cirq-google).
+
+    The circuit is routed onto the device's grid, every CX is rewritten into CZ gates
+    (CZ), and Cirq's NoiseModelFromGoogleNoiseProperties adds gate Pauli errors,
+    T1/Tphi decay and readout errors before a density-matrix simulation.
+    """
     import cirq
+    from collections import Counter
 
-    tc = transpile(circuit, basis_gates=["rz", "sx", "x", "cx", "measure"],
+    qubits, cmap, model = _cirq_google_noise()
+    tc = transpile(circuit, coupling_map=cmap, basis_gates=["rz", "sx", "x", "cx", "measure"],
                    optimization_level=3, seed_transpiler=seed)
-    qs, ops, meas = _cirq_ops(tc)
+    ops, meas = [], {}
+    for inst in tc.data:
+        name = inst.operation.name
+        gq = [qubits[tc.find_bit(q).index] for q in inst.qubits]
+        if name == "rz":
+            ops.append(cirq.rz(float(inst.operation.params[0])).on(gq[0]))
+        elif name == "sx":
+            ops.append((cirq.X ** 0.5).on(gq[0]))
+        elif name == "x":
+            ops.append(cirq.X.on(gq[0]))
+        elif name == "cx":
+            ops.append(cirq.CNOT.on(*gq))
+        elif name == "measure":
+            meas[tc.find_bit(inst.clbits[0]).index] = gq[0]
+        elif name != "barrier":
+            raise ValueError(f"Unexpected gate {name}")
+    ccirc = cirq.optimize_for_target_gateset(cirq.Circuit(ops), gateset=cirq.CZTargetGateset())
     cols = sorted(meas)
-    ops.append(cirq.measure(*[qs[meas[c]] for c in cols], key="m"))
-    model = cirq.ConstantQubitNoiseModel(cirq.depolarize(CIRQ_P))
-    res = cirq.DensityMatrixSimulator(noise=model, seed=seed).run(cirq.Circuit(ops), repetitions=shots)
-    return tc, _cirq_counts(res.measurements["m"], CIRQ_READOUT, seed)
+    ccirc.append(cirq.measure(*[meas[c] for c in cols], key="m"))
+    res = cirq.DensityMatrixSimulator(noise=model, seed=seed).run(ccirc, repetitions=shots)
+    counts = Counter("".join(str(int(b)) for b in reversed(row)) for row in res.measurements["m"])
+    return tc, dict(counts)
 
 
-# Quantinuum H-series error rates (order of magnitude of the published H2 figures)
-QTM_ERR = {"p1": 3e-5, "p2": 1.5e-3, "p_meas": 1e-3, "p_init": 1e-4}
+# Typical values from the Quantinuum H2 Product Data Sheet v2.00 (15 Oct 2024):
+# 1q infidelity 3e-5, 2q infidelity 1.5e-3, SPAM error 1.5e-3 (split evenly between
+# preparation and measurement). Memory and cross-talk errors are not modelled.
+QTM_ERR = {"p1": 3e-5, "p2": 1.5e-3, "p_meas": 7.5e-4, "p_init": 7.5e-4}
 
 
 def _run_quantinuum(circuit, shots, seed):
@@ -361,16 +351,16 @@ def _run_quantinuum(circuit, shots, seed):
 
 BACKENDS = {
     "Cirq noisy": {
-        "vendor": "Google Cirq",
+        "vendor": "Google Cirq (Willow calibration)",
         "noise": "Noisy",
-        "native": "rz, sx, x, cx",
-        "desc": "Cirq's own density-matrix simulator with depolarizing noise after every moment (p=0.03% per qubit per moment) plus 1% readout flips.",
+        "native": "CZ, PhasedXZ (105-qubit grid)",
+        "desc": "Cirq NoiseModelFromGoogleNoiseProperties with the median calibration of Google's Willow device shipped in cirq-google (gate Pauli errors, T1/Tphi, readout), after routing onto the device grid and rewriting CX into CZ.",
     },
     "Quantinuum noisy": {
         "vendor": "Quantinuum (H2 emulator)",
         "noise": "Noisy",
         "native": "ZZPhase, PhasedX, Rz (all-to-all)",
-        "desc": "Compiled with Quantinuum's pytket compiler for H2 native gates and run on the PECOS emulator with H-series-level depolarizing and measurement errors (local emulator, no account needed).",
+        "desc": "Compiled with Quantinuum's pytket compiler for H2 native gates and run on the PECOS emulator with the typical error figures from the H2 product data sheet (1q 3e-5, 2q 1.5e-3, SPAM 1.5e-3). Local emulator, no account needed.",
     },
     "Aer ideal": {
         "vendor": "Qiskit Aer",
@@ -384,11 +374,11 @@ BACKENDS = {
         "native": "h, t, tdg, rx/ry/rz, cx, ...",
         "desc": "Transpiled to IonQ's QIS gate set (optimization level 0, as in the notebook) and run on Aer. All-to-all connectivity, so no SWAPs.",
     },
-    "IQM-style noisy": {
-        "vendor": "IQM (emulated)",
+    "IQM Garnet noisy": {
+        "vendor": "IQM (fake backend)",
         "noise": "Noisy",
         "native": "r, cz",
-        "desc": "20-qubit square-lattice device with IQM's {r, cz} native gates and a synthetic noise model.",
+        "desc": "IQMFakeGarnet: 20-qubit device with IQM's native {r, cz} gates and the noise data IQM ships with it (T1/T2, gate and readout errors).",
     },
     "IBM Marrakesh noisy": {
         "vendor": "IBM (fake backend)",
@@ -421,7 +411,7 @@ def run_backend(name: str, circuit: QuantumCircuit, shots: int, seed: int = 1234
     elif name == "IonQ-style ideal":
         tc = transpile(circuit, basis_gates=IONQ_BASIS, optimization_level=0, seed_transpiler=seed)
         res = AerSimulator().run(tc, shots=shots, seed_simulator=seed).result()
-    elif name == "IQM-style noisy":
+    elif name == "IQM Garnet noisy":
         be, sim = _iqm_backend_and_sim()
         tc = transpile(circuit, backend=be, optimization_level=3, seed_transpiler=seed)
         res = sim.run(tc, shots=shots, seed_simulator=seed).result()
